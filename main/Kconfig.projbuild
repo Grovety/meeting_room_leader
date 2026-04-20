@@ -1,0 +1,60 @@
+menu "App Configurations"
+
+config WAKEWORD_I2S_PORT
+    int "I2S controller index for microphone"
+    default 0
+    range 0 1
+    help
+        I2S controller number used for STD RX.
+
+config WAKEWORD_I2S_WS_GPIO
+    int "I2S WS/LRCK GPIO"
+    default 2
+    range 0 48
+    help
+        Word-select / LRCK pin for I2S microphone input.
+
+config WAKEWORD_I2S_BCK_GPIO
+    int "I2S BCK/SCK GPIO"
+    default 19
+    range 0 48
+    help
+        Bit clock pin for I2S microphone input.
+
+config WAKEWORD_I2S_DIN_GPIO
+    int "I2S DIN GPIO (SD)"
+    default 20
+    range 0 48
+    help
+        Serial data input pin for I2S microphone input.
+
+config WAKEWORD_I2S_DMA_DESC_NUM
+    int "I2S RX DMA descriptor count"
+    default 2
+    range 2 16
+    help
+        Number of DMA descriptors for I2S RX.
+
+config WAKEWORD_I2S_PCM_SHIFT
+    int "PCM downshift from raw 32-bit to int16 (-1 auto)"
+    default -1
+    range -1 24
+    help
+        Used by I2S STD RX backend for converting raw 32-bit samples to int16.
+        -1 means auto-detect on startup.
+
+choice WAKEWORD_I2S_SLOT
+    prompt "I2S slot selection"
+    default WAKEWORD_I2S_SLOT_RIGHT
+
+    config WAKEWORD_I2S_SLOT_RIGHT
+        bool "RIGHT"
+
+    config WAKEWORD_I2S_SLOT_LEFT
+        bool "LEFT"
+
+    config WAKEWORD_I2S_SLOT_BOTH
+        bool "BOTH"
+endchoice
+
+endmenu
