@@ -137,9 +137,7 @@ static void weather_emit_cached_update_snapshot(void)
         return;
     }
 
-    if (!weather_copy_cached_snapshot(&data, forecast, &count)) {
-        return;
-    }
+    (void)weather_copy_cached_snapshot(&data, forecast, &count);
 
     weather_update_callback(&data, forecast, count);
 }
@@ -553,6 +551,23 @@ void weather_module_set_config(const weather_config_t* config) {
         }
     }
     xSemaphoreGive(config_mutex);
+
+    if (data_mutex) {
+        xSemaphoreTake(data_mutex, portMAX_DELAY);
+        if (current_config.api_key[0] == '\0') {
+            cached_status = WEATHER_DATA_STATUS_API_KEY_REQUIRED;
+        } else if (weather_api_key_looks_invalid(current_config.api_key)) {
+            cached_status = WEATHER_DATA_STATUS_INVALID_API_KEY;
+        } else if (cached_status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
+                   cached_status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+            cached_status = WEATHER_DATA_STATUS_UNAVAILABLE;
+        }
+        xSemaphoreGive(data_mutex);
+    }
+
+    if (weather_update_callback) {
+        weather_emit_cached_update_snapshot();
+    }
 
     ESP_LOGI(TAG, "Weather config updated");
 }

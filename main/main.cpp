@@ -1,6 +1,7 @@
 #include "board/esp_panel_board_default_config.hpp"
 #include "cJSON.h"
 #include "config_portal.h"
+#include "device_name_store.h"
 #include "driver/i2c.h"
 #include "driver/uart.h"
 #include "esp_display_panel.hpp"
@@ -16,16 +17,19 @@
 #include "nvs_flash.h"
 #include "port/esp_io_expander.h"
 #include "port/esp_io_expander_tca9554.h"
+#include "info_links_store.h"
 #include "sdkconfig.h"
 #include "sleep_manager.h"
 #include "time_sync.h"
 #include "weather_integration.h"
 #include "wifi_manager.h"
 #include "aux_udp_link.h"
+#include <string.h>
 #include <lvgl.h>
 extern "C" {
 #include "ui.h"
 void ui_update_time_display(uint8_t hour, uint8_t minute);
+void ui_Screen8_refresh_device_name(void);
 /* Initialization (optional, but provides a unified interface) */
 esp_err_t rtc_ds3231_init(void);
 
@@ -48,6 +52,7 @@ static const char* TAG = "app";
 /* UART settings */
 #define GUI_UART_PORT   UART_NUM_0 // USB-Serial used by PC GUI (app.py)
 #define GUI_RX_BUF_SIZE 1024
+#define GUI_UART_TASK_STACK_SIZE (8 * 1024)
 
 /* I2C settings for hardware version detection */
 #define I2C_MASTER_TIMEOUT_MS 1000
@@ -237,17 +242,86 @@ static void gui_uart_task(void* arg)
 
             cJSON* root = cJSON_Parse(s);
             if (root) {
-                cJSON* ssid = cJSON_GetObjectItem(root, "wifi_ssid");
-                cJSON* pass = cJSON_GetObjectItem(root, "wifi_pass");
+                cJSON* ssid = cJSON_GetObjectItemCaseSensitive(root, "wifi_ssid");
+                cJSON* pass = cJSON_GetObjectItemCaseSensitive(root, "wifi_pass");
+                cJSON* panel_name = cJSON_GetObjectItemCaseSensitive(root, "panel_name");
+                cJSON* weather_api_key = cJSON_GetObjectItemCaseSensitive(root, "weather_api_key");
+                cJSON* company_website_url = cJSON_GetObjectItemCaseSensitive(root, "company_website_url");
+                cJSON* office_map_url = cJSON_GetObjectItemCaseSensitive(root, "office_map_url");
+                bool has_wifi_payload = cJSON_IsString(ssid);
+                bool has_settings_payload = cJSON_IsString(panel_name) || cJSON_IsString(weather_api_key) ||
+                                           cJSON_IsString(company_website_url) || cJSON_IsString(office_map_url);
 
-                if (cJSON_IsString(ssid) && cJSON_IsString(pass)) {
+                if (has_wifi_payload) {
+                    const char* pass_value = cJSON_IsString(pass) ? pass->valuestring : "";
+                    esp_err_t wifi_err;
+
                     ESP_LOGI(TAG, "UART0: got wifi credentials (ssid='%s')", ssid->valuestring);
-                    wifi_manager_save_credentials(ssid->valuestring, pass->valuestring);
-                    wifi_manager_init_sta(ssid->valuestring, pass->valuestring);
-                    const char* ok = "WIFI:OK\n";
-                    uart_write_bytes(GUI_UART_PORT, ok, strlen(ok));
-                } else {
-                    ESP_LOGW(TAG, "UART0: JSON received but no known fields (wifi_ssid/wifi_pass)");
+                    wifi_err = wifi_manager_save_credentials(ssid->valuestring, pass_value);
+                    if (wifi_err == ESP_OK) {
+                        wifi_manager_init_sta(ssid->valuestring, pass_value);
+                        const char* ok = "WIFI:OK\n";
+                        uart_write_bytes(GUI_UART_PORT, ok, strlen(ok));
+                    } else {
+                        ESP_LOGE(TAG, "UART0: failed to save Wi-Fi credentials: %s", esp_err_to_name(wifi_err));
+                        const char* err = "WIFI:ERR\n";
+                        uart_write_bytes(GUI_UART_PORT, err, strlen(err));
+                    }
+                }
+
+                if (has_settings_payload) {
+                    esp_err_t settings_err = ESP_OK;
+                    info_links_store_data_t* info_links =
+                        (info_links_store_data_t*)calloc(1, sizeof(info_links_store_data_t));
+
+                    if (!info_links) {
+                        ESP_LOGE(TAG, "UART0: failed to allocate settings buffer");
+                        settings_err = ESP_ERR_NO_MEM;
+                    } else {
+                        info_links_store_get(info_links);
+                    }
+
+                    if (cJSON_IsString(panel_name)) {
+                        settings_err = device_name_store_set(panel_name->valuestring);
+                        if (settings_err == ESP_OK && lvgl_port_lock(500)) {
+                            ui_Screen8_refresh_device_name();
+                            lvgl_port_unlock();
+                        }
+                    }
+
+                    if (settings_err == ESP_OK && cJSON_IsString(weather_api_key)) {
+                        weather_integration_set_api_key(weather_api_key->valuestring);
+                    }
+
+                    if (info_links && cJSON_IsString(company_website_url)) {
+                        strlcpy(info_links->company_website, company_website_url->valuestring,
+                                sizeof(info_links->company_website));
+                    }
+
+                    if (info_links && cJSON_IsString(office_map_url)) {
+                        strlcpy(info_links->office_map, office_map_url->valuestring, sizeof(info_links->office_map));
+                    }
+
+                    if (settings_err == ESP_OK && info_links) {
+                        settings_err = info_links_store_set(info_links);
+                    }
+
+                    if (settings_err == ESP_OK) {
+                        const char* ok = "CONFIG:OK\n";
+                        uart_write_bytes(GUI_UART_PORT, ok, strlen(ok));
+                    } else {
+                        ESP_LOGE(TAG, "UART0: failed to apply panel settings: %s", esp_err_to_name(settings_err));
+                        const char* err = "CONFIG:ERR\n";
+                        uart_write_bytes(GUI_UART_PORT, err, strlen(err));
+                    }
+
+                    free(info_links);
+                }
+
+                if (!has_wifi_payload && !has_settings_payload) {
+                    ESP_LOGW(TAG,
+                             "UART0: JSON received but no known fields "
+                             "(wifi_ssid, panel_name, weather_api_key, company_website_url, office_map_url)");
                 }
 
                 cJSON_Delete(root);
@@ -732,7 +806,7 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "wifi_init task create result: %d", (int)r);
 
     // 6) Start GUI UART RX task (handles JSON from PC)
-    r = xTaskCreate(gui_uart_task, "gui_uart", 4096, NULL, 10, NULL);
+    r = xTaskCreate(gui_uart_task, "gui_uart", GUI_UART_TASK_STACK_SIZE, NULL, 10, NULL);
     ESP_LOGI(TAG, "gui_uart task create result: %d", (int)r);
 
     esp_err_t aux_udp_err = aux_udp_link_start();

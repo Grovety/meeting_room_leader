@@ -6,6 +6,7 @@
 
 #include <esp_log.h>
 #include <esp_http_client.h>
+#include <esp_crt_bundle.h>
 #include <json_parser.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -611,10 +612,17 @@ static uint32_t perform_http_once(const char* log_tag,
     esp_http_client_config_t config = {};
     config.url = url;
     config.method = HTTP_METHOD_GET;
-    config.timeout_ms = 15000;
+    config.timeout_ms = 20000;
     config.disable_auto_redirect = false;
     config.max_redirection_count = 5;
     const bool is_https = (strncmp(url, "https://", 8) == 0);
+    config.addr_type = HTTP_ADDR_TYPE_INET;
+    if (is_https) {
+        config.transport_type = HTTP_TRANSPORT_OVER_SSL;
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+        config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+    }
 
     if (!weather_wait_for_http_heap("before_init")) {
         ESP_LOGW(log_tag, "Skipping HTTP attempt for now: not enough INTERNAL heap before client init");
@@ -785,14 +793,14 @@ bool WeatherService::fetch_current_weather(weather_data_t* data) {
     const char* lang = "en";
     if (ctx_->use_coordinates) {
         snprintf(url, sizeof(url),
-                 "http://api.openweathermap.org/data/2.5/weather?lat=%s&lon=%s&appid=%s&units=%s&lang=%s",
+                 "https://api.openweathermap.org/data/2.5/weather?lat=%s&lon=%s&appid=%s&units=%s&lang=%s",
                  ctx_->latitude, ctx_->longitude, ctx_->api_key,
                  ctx_->metric_units ? "metric" : "imperial", lang);
     } else {
         char encoded_city[256] = {0};
         url_encode(ctx_->location_name, encoded_city, sizeof(encoded_city));
         snprintf(url, sizeof(url),
-                 "http://api.openweathermap.org/data/2.5/weather?q=%s&appid=%s&units=%s&lang=%s",
+                 "https://api.openweathermap.org/data/2.5/weather?q=%s&appid=%s&units=%s&lang=%s",
                  encoded_city, ctx_->api_key,
                  ctx_->metric_units ? "metric" : "imperial", lang);
     }
@@ -858,14 +866,14 @@ bool WeatherService::fetch_forecast(weather_forecast_day_t* forecast, uint8_t* c
     const char* lang = "en";
     if (ctx_->use_coordinates) {
         snprintf(url, sizeof(url),
-                 "http://api.openweathermap.org/data/2.5/forecast?lat=%s&lon=%s&appid=%s&units=%s&cnt=40&lang=%s",
+                 "https://api.openweathermap.org/data/2.5/forecast?lat=%s&lon=%s&appid=%s&units=%s&cnt=40&lang=%s",
                  ctx_->latitude, ctx_->longitude, ctx_->api_key,
                  ctx_->metric_units ? "metric" : "imperial", lang);
     } else {
         char encoded_city[256] = {0};
         url_encode(ctx_->location_name, encoded_city, sizeof(encoded_city));
         snprintf(url, sizeof(url),
-                 "http://api.openweathermap.org/data/2.5/forecast?q=%s&appid=%s&units=%s&cnt=40&lang=%s",
+                 "https://api.openweathermap.org/data/2.5/forecast?q=%s&appid=%s&units=%s&cnt=40&lang=%s",
                  encoded_city, ctx_->api_key,
                  ctx_->metric_units ? "metric" : "imperial", lang);
     }

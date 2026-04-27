@@ -46,6 +46,7 @@ static const char* NVS_KEY_TZ_POSIX = "tz_posix";
 static bool s_started = false;
 static volatile bool s_synced  = false; // volatile because it is modified in a callback
 static TaskHandle_t s_sntp_task_handle = NULL;
+static bool s_sntp_started = false;
 #if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY)
 static StaticTask_t *s_sntp_tcb = NULL;
 static StackType_t *s_sntp_stack = NULL;
@@ -400,8 +401,8 @@ static void time_sync_apply_runtime_context(void)
 static void time_sync_start_sntp_client_once(void)
 {
     char *ntp_hosts[] = {
-        "pool.ntp.org",
         "time.google.com",
+        "pool.ntp.org",
         "time.cloudflare.com"
     };
     const size_t ntp_hosts_count = sizeof(ntp_hosts) / sizeof(ntp_hosts[0]);
@@ -420,19 +421,18 @@ static void time_sync_start_sntp_client_once(void)
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
 
     if (resolved_any && s_ntp_server0_name[0] != '\0') {
-        ESP_LOGI(TAG, "Using resolved IP for SNTP server 0: %s", s_ntp_server0_name);
-        esp_sntp_setservername(0, s_ntp_server0_name);
-        esp_sntp_setservername(1, ntp_hosts[1]);
-        esp_sntp_setservername(2, ntp_hosts[2]);
+        ESP_LOGI(TAG, "DNS probe succeeded, but SNTP will use hostnames for resilience");
     } else {
-        ESP_LOGW(TAG, "No NTP host resolved to IP, using hostnames (SNTP will resolve internally).");
-        esp_sntp_setservername(0, ntp_hosts[0]);
-        esp_sntp_setservername(1, ntp_hosts[1]);
-        esp_sntp_setservername(2, ntp_hosts[2]);
+        ESP_LOGW(TAG, "DNS probe did not resolve an NTP host yet; SNTP will still use hostnames");
     }
+
+    esp_sntp_setservername(0, ntp_hosts[0]);
+    esp_sntp_setservername(1, ntp_hosts[1]);
+    esp_sntp_setservername(2, ntp_hosts[2]);
 
     sntp_set_time_sync_notification_cb(sntp_time_sync_notification_cb);
     esp_sntp_init();
+    s_sntp_started = true;
     ESP_LOGI(TAG, "SNTP client initialized");
 }
 
@@ -507,7 +507,6 @@ static void sntp_task(void* arg)
 
     // 2) Start SNTP with infinite retries: temporary DNS/UDP failures no longer require reboot.
     const int wifi_wait_max = 60;
-    const int dns_wait_seconds_per_host = 5;
     const int max_wait_sync = 30;
     const int retry_delay_sec = 15;
 
@@ -523,11 +522,6 @@ static void sntp_task(void* arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
-        // Keep the wait loop cadence from the task path, but actual client setup is shared.
-        // This avoids maintaining two different SNTP configurations.
-        for (int i = 0; i < dns_wait_seconds_per_host && wifi_manager_is_connected(); ++i) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
         time_sync_start_sntp_client_once();
 
         int waited = 0;
@@ -592,5 +586,14 @@ bool time_sync_start(const char* iana_tz, const char* city)
 
 bool time_sync_is_synced(void)
 {
+    if (s_synced) {
+        return true;
+    }
+
+    if (s_sntp_started && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+        s_synced = true;
+        return true;
+    }
+
     return s_synced;
 }

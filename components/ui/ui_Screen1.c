@@ -159,6 +159,7 @@ static bool s_connect_in_progress = false;
 static bool s_portal_action_busy = false;
 static bool s_setup_should_auto_open = false;
 static bool s_setup_should_close = false;
+static TickType_t s_setup_transition_earliest_tick = 0;
 static bool s_setup_local_status_is_error = false;
 static char s_setup_local_status[128] = {0};
 static char s_setup_last_wifi_qr_payload[128] = {0};
@@ -168,6 +169,7 @@ static char s_setup_last_url_detail[96] = {0};
 
 #define SCREEN1_SLEEP_PRESET_COUNT 5
 #define SCREEN1_NETWORKS_PER_PAGE 4
+#define SCREEN1_SETUP_TRANSITION_DEBOUNCE_MS 400
 static lv_obj_t *s_sleep_preset_buttons[SCREEN1_SLEEP_PRESET_COUNT] = {0};
 static lv_obj_t *s_sleep_preset_button_labels[SCREEN1_SLEEP_PRESET_COUNT] = {0};
 
@@ -243,6 +245,8 @@ static void sleep_preset_button_event_cb(lv_event_t *e);
 static void set_setup_local_status(const char *status_text, bool is_error);
 static bool setup_has_wifi_activity(void);
 static bool setup_phase_is_transitional(config_portal_phase_t phase);
+static void schedule_setup_transition_debounce(void);
+static bool setup_transition_debounce_ready(void);
 static void maybe_process_setup_runtime_state(void);
 static void setup_transition_request(bool enable);
 static void update_setup_page_ui(const char *status_text, bool is_error, bool busy);
@@ -829,12 +833,14 @@ static void switch_section(screen1_section_t section, bool animate)
         s_setup_should_auto_open =
             !config_portal_is_runtime_mode() &&
             (portal_phase == CONFIG_PORTAL_PHASE_IDLE || portal_phase == CONFIG_PORTAL_PHASE_ERROR);
+        schedule_setup_transition_debounce();
         set_setup_local_status(NULL, false);
         maybe_process_setup_runtime_state();
         update_setup_page_ui(NULL, false, s_portal_action_busy);
     } else if (old_section == SCREEN1_SECTION_SETUP && section != SCREEN1_SECTION_SETUP) {
         s_setup_should_auto_open = false;
         s_setup_should_close = true;
+        schedule_setup_transition_debounce();
         set_setup_local_status(NULL, false);
         maybe_process_setup_runtime_state();
     }
@@ -1058,6 +1064,26 @@ static bool setup_phase_is_transitional(config_portal_phase_t phase)
            phase == CONFIG_PORTAL_PHASE_STOPPING;
 }
 
+static void schedule_setup_transition_debounce(void)
+{
+    s_setup_transition_earliest_tick =
+        xTaskGetTickCount() + pdMS_TO_TICKS(SCREEN1_SETUP_TRANSITION_DEBOUNCE_MS);
+}
+
+static bool setup_transition_debounce_ready(void)
+{
+    if (s_setup_transition_earliest_tick == 0) {
+        return true;
+    }
+
+    if ((int32_t)(xTaskGetTickCount() - s_setup_transition_earliest_tick) < 0) {
+        return false;
+    }
+
+    s_setup_transition_earliest_tick = 0;
+    return true;
+}
+
 static void setup_transition_request(bool enable)
 {
     setup_transition_result_t *job = NULL;
@@ -1081,6 +1107,7 @@ static void setup_transition_request(bool enable)
 
     job->enable = enable;
     s_portal_action_busy = true;
+    s_setup_transition_earliest_tick = 0;
     set_setup_local_status(NULL, false);
 
     if (create_screen1_worker_task(setup_transition_task, task_name, 4096, job, tskIDLE_PRIORITY + 1) != pdPASS) {
@@ -1110,6 +1137,10 @@ static void maybe_process_setup_runtime_state(void)
     }
 
     if (s_setup_should_close) {
+        if (!setup_transition_debounce_ready()) {
+            return;
+        }
+
         if (runtime_running || setup_phase_is_transitional(phase)) {
             setup_transition_request(false);
             return;
@@ -1121,6 +1152,10 @@ static void maybe_process_setup_runtime_state(void)
 
     if (s_active_section == SCREEN1_SECTION_SETUP) {
         if (s_setup_should_auto_open && !runtime_running) {
+            if (!setup_transition_debounce_ready()) {
+                return;
+            }
+
             if (setup_phase_is_transitional(phase) || setup_has_wifi_activity()) {
                 return;
             }
@@ -1138,6 +1173,10 @@ static void maybe_process_setup_runtime_state(void)
     }
 
     if (phase == CONFIG_PORTAL_PHASE_APPLYING || phase == CONFIG_PORTAL_PHASE_STOPPING) {
+        return;
+    }
+
+    if (!setup_transition_debounce_ready()) {
         return;
     }
 
@@ -3809,6 +3848,7 @@ void ui_Screen1_screen_destroy(void)
     s_setup_local_status_is_error = false;
     s_setup_should_auto_open = false;
     s_setup_should_close = false;
+    s_setup_transition_earliest_tick = 0;
     s_setup_last_wifi_qr_payload[0] = '\0';
     s_setup_last_url_qr_payload[0] = '\0';
     s_setup_last_wifi_detail[0] = '\0';

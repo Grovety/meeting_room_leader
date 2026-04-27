@@ -51,6 +51,7 @@ idf_component_register(
     PRIV_REQUIRES
     json
     main
+    mbedtls
 )
 
 set_source_files_properties(

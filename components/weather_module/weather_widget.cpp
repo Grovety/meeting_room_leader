@@ -70,6 +70,8 @@ static const char* weather_widget_status_message(weather_data_status_t status) {
             return "API key required";
         case WEATHER_DATA_STATUS_INVALID_API_KEY:
             return "Invalid API key";
+        case WEATHER_DATA_STATUS_UNAVAILABLE:
+            return "Updating...";
         default:
             return NULL;
     }

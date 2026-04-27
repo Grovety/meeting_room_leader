@@ -190,7 +190,8 @@ void WeatherUI::show(void) {
     weather_data_t data;
     const weather_data_status_t status = weather_module_get_status();
     if (status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
-        status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+        status == WEATHER_DATA_STATUS_INVALID_API_KEY ||
+        status == WEATHER_DATA_STATUS_UNAVAILABLE) {
         ui->apply_status_state(status);
     } else if (weather_get_current_data(&data)) {
         ui->update_current_weather(&data);
@@ -203,7 +204,8 @@ void WeatherUI::show(void) {
     weather_forecast_day_t forecast[4];
     uint8_t count = 0;
     if (status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
-        status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+        status == WEATHER_DATA_STATUS_INVALID_API_KEY ||
+        status == WEATHER_DATA_STATUS_UNAVAILABLE) {
         ui->clear_forecast_display();
     } else if (weather_get_forecast_data(forecast, &count) && count > 0) {
         ui->update_forecast(forecast, count);
@@ -739,6 +741,8 @@ void WeatherUI::apply_status_state(weather_data_status_t status) {
         message = "API key required";
     } else if (status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
         message = "Invalid API key";
+    } else if (status == WEATHER_DATA_STATUS_UNAVAILABLE) {
+        message = "Updating...";
     }
 
     if (!message) {
@@ -762,7 +766,8 @@ void WeatherUI::update_current_weather(const weather_data_t* data) {
     if (!initialized_ || !data) return;
     const weather_data_status_t status = weather_module_get_status();
     if (status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
-        status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+        status == WEATHER_DATA_STATUS_INVALID_API_KEY ||
+        status == WEATHER_DATA_STATUS_UNAVAILABLE) {
         apply_status_state(status);
         return;
     }
@@ -917,7 +922,8 @@ void WeatherUI::refresh_language(void) {
     uint8_t count = 0;
 
     if (status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
-        status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+        status == WEATHER_DATA_STATUS_INVALID_API_KEY ||
+        status == WEATHER_DATA_STATUS_UNAVAILABLE) {
         apply_status_state(status);
     } else if (weather_get_current_data(&data)) {
         update_current_weather(&data);
@@ -927,7 +933,8 @@ void WeatherUI::refresh_language(void) {
     }
 
     if (status == WEATHER_DATA_STATUS_API_KEY_REQUIRED ||
-        status == WEATHER_DATA_STATUS_INVALID_API_KEY) {
+        status == WEATHER_DATA_STATUS_INVALID_API_KEY ||
+        status == WEATHER_DATA_STATUS_UNAVAILABLE) {
         clear_forecast_display();
     } else if (weather_get_forecast_data(forecast, &count) && count > 0) {
         update_forecast(forecast, count);

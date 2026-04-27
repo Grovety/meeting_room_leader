@@ -44,6 +44,8 @@ static const char* kWeatherUnitsKey = "metric";
 /* Background task control */
 static volatile bool s_start_task_running = false;
 static volatile bool s_start_task_cancel = false;
+static TaskHandle_t s_ip_start_deferred_task = NULL;
+static constexpr uint32_t kWeatherIpStartTaskStackBytes = 4 * 1024;
 
 /* WiFi/IP event handler instance handle */
 static esp_event_handler_instance_t s_ip_event_handle = NULL;
@@ -230,14 +232,48 @@ static void apply_current_config_to_module(void) {
     }
 }
 
+static bool weather_config_has_location(void)
+{
+    return ((current_config.latitude != 0.0 || current_config.longitude != 0.0) ||
+            current_config.city[0] != '\0');
+}
+
 /* Forward decl for start task */
 static void weather_start_task(void *arg);
+static void weather_start_from_ip_event_task(void *arg);
+
+static void weather_start_from_ip_event_task(void *arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "Deferred IP_EVENT weather start");
+    weather_integration_start();
+    s_ip_start_deferred_task = NULL;
+    vTaskDelete(NULL);
+}
 
 /* IP event handler: called when interface gets address */
 static void ip_got_ip_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
     (void)arg; (void)base; (void)id; (void)data;
-    ESP_LOGI(TAG, "IP_EVENT_STA_GOT_IP: triggering weather_integration_start()");
-    weather_integration_start();
+    if (s_ip_start_deferred_task != NULL) {
+        ESP_LOGI(TAG, "IP_EVENT_STA_GOT_IP: deferred weather start already queued");
+        return;
+    }
+    if (weather_module_is_running() || s_start_task_running) {
+        ESP_LOGI(TAG, "IP_EVENT_STA_GOT_IP: weather already running or starting");
+        return;
+    }
+
+    BaseType_t rc = xTaskCreate(
+        weather_start_from_ip_event_task,
+        "weather_ip_start",
+        kWeatherIpStartTaskStackBytes,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        &s_ip_start_deferred_task);
+
+    if (rc != pdPASS) {
+        s_ip_start_deferred_task = NULL;
+        ESP_LOGW(TAG, "IP_EVENT_STA_GOT_IP: failed to queue deferred weather start");
+    }
 }
 
 /* Initialize integration: weather module init + register IP event */
@@ -256,6 +292,7 @@ void weather_integration_init(void) {
     current_config.update_interval_sec = 300;
     current_config.use_coordinates = false;
     load_persisted_weather_settings();
+    weather_module_set_config(&current_config);
 
     weather_module_set_update_callback(weather_data_update_callback);
 
@@ -489,6 +526,11 @@ void weather_integration_start(void) {
     }
 
     ESP_LOGI(TAG, "Requested weather_integration_start()");
+
+    if (!weather_config_has_location()) {
+        ESP_LOGI(TAG, "Weather start deferred: location is not ready yet");
+        return;
+    }
 
     if (weather_module_is_running()) {
         ESP_LOGI(TAG, "Weather module already running; ensuring config is up to date");
