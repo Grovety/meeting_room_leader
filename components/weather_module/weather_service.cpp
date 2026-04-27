@@ -92,6 +92,51 @@ static bool weather_wait_for_http_heap(const char* stage) {
     return false;
 }
 
+static const char* weather_log_url_label(const char* url)
+{
+    if (!url) {
+        return "(null)";
+    }
+    if (strncmp(url, "https://api.openweathermap.org/", sizeof("https://api.openweathermap.org/") - 1) == 0) {
+        return "https://api.openweathermap.org/...";
+    }
+    if (strncmp(url, "http://api.openweathermap.org/", sizeof("http://api.openweathermap.org/") - 1) == 0) {
+        return "http://api.openweathermap.org/...";
+    }
+    return "(redacted)";
+}
+
+static bool weather_make_openweather_http_fallback_url(const char* url, char* out, size_t out_size)
+{
+    static const char* kHttpsPrefix = "https://api.openweathermap.org/";
+    static const char* kHttpPrefix = "http://api.openweathermap.org/";
+    const size_t https_prefix_len = strlen(kHttpsPrefix);
+
+    if (!url || !out || out_size == 0 || strncmp(url, kHttpsPrefix, https_prefix_len) != 0) {
+        return false;
+    }
+
+    int written = snprintf(out, out_size, "%s%s", kHttpPrefix, url + https_prefix_len);
+    return written > 0 && (size_t)written < out_size;
+}
+
+static void weather_log_http_heap_snapshot(const char* log_tag, const char* stage, const char* url)
+{
+    const size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const size_t free_spiram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t largest_spiram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(log_tag ? log_tag : TAG,
+             "HTTP heap snapshot (%s): INTERNAL free=%llu largest=%llu, SPIRAM free=%llu largest=%llu, url=%s",
+             stage ? stage : "?",
+             (unsigned long long)free_internal,
+             (unsigned long long)largest_internal,
+             (unsigned long long)free_spiram,
+             (unsigned long long)largest_spiram,
+             weather_log_url_label(url));
+}
+
 static void clear_today_outlook(weather_today_outlook_t* outlook) {
     if (!outlook) {
         return;
@@ -613,9 +658,9 @@ static uint32_t perform_http_once(const char* log_tag,
     config.url = url;
     config.method = HTTP_METHOD_GET;
     config.timeout_ms = 20000;
-    config.disable_auto_redirect = false;
-    config.max_redirection_count = 5;
     const bool is_https = (strncmp(url, "https://", 8) == 0);
+    config.disable_auto_redirect = !is_https;
+    config.max_redirection_count = is_https ? 5 : 0;
     config.addr_type = HTTP_ADDR_TYPE_INET;
     if (is_https) {
         config.transport_type = HTTP_TRANSPORT_OVER_SSL;
@@ -626,29 +671,37 @@ static uint32_t perform_http_once(const char* log_tag,
 
     if (!weather_wait_for_http_heap("before_init")) {
         ESP_LOGW(log_tag, "Skipping HTTP attempt for now: not enough INTERNAL heap before client init");
+        weather_log_http_heap_snapshot(log_tag, "before_init_insufficient", url);
         return 0;
     }
 
+    weather_log_http_heap_snapshot(log_tag, "before_init", url);
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
         ESP_LOGE(log_tag, "Failed to init esp_http_client");
+        weather_log_http_heap_snapshot(log_tag, "init_failed", url);
         return 0;
     }
 
     esp_http_client_set_header(client, "Accept", "application/json");
+    esp_http_client_set_header(client, "Connection", "close");
+    esp_http_client_set_header(client, "User-Agent", "ESP32-Weather-Service/1.0");
 
     if (!weather_wait_for_http_heap("before_open")) {
         if (is_https) {
             ESP_LOGW(log_tag, "Skipping HTTP attempt for now: not enough INTERNAL heap before open");
+            weather_log_http_heap_snapshot(log_tag, "before_open_insufficient", url);
             esp_http_client_cleanup(client);
             return 0;
         }
         ESP_LOGW(log_tag, "Low INTERNAL heap before open, but continuing because request is plain HTTP");
     }
 
+    weather_log_http_heap_snapshot(log_tag, "before_open", url);
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
         ESP_LOGE(log_tag, "esp_http_client_open failed: %s", esp_err_to_name(err));
+        weather_log_http_heap_snapshot(log_tag, "open_failed", url);
         esp_http_client_cleanup(client);
         return 0;
     }
@@ -718,17 +771,30 @@ static uint32_t perform_http_with_retries(const char* log_tag,
                                           const char* url,
                                           char* response_buffer,
                                           size_t response_buffer_size) {
+    char fallback_url[512] = {0};
+    const bool has_http_fallback = weather_make_openweather_http_fallback_url(url, fallback_url, sizeof(fallback_url));
+
     for (int attempt = 0; attempt < WEATHER_HTTP_MAX_RETRIES; ++attempt) {
         ESP_LOGI(log_tag, "HTTP attempt %d started", attempt + 1);
         uint32_t response_len = perform_http_once(log_tag, url, response_buffer, response_buffer_size);
         if (response_len > 0) {
             ESP_LOGI(log_tag, "HTTP attempt %d success, received %u bytes", attempt + 1, response_len);
             return response_len;
-        } else {
-            ESP_LOGW(log_tag, "HTTP attempt %d failed (response_len=%u)", attempt + 1, response_len);
-            if (attempt < WEATHER_HTTP_MAX_RETRIES - 1) {
-                vTaskDelay(pdMS_TO_TICKS(WEATHER_HTTP_BACKOFF_MS[attempt]));
+        }
+
+        if (has_http_fallback && s_last_http_status == 0) {
+            ESP_LOGW(log_tag, "HTTPS OpenWeather transport failed before HTTP status; trying plain HTTP fallback");
+            response_len = perform_http_once(log_tag, fallback_url, response_buffer, response_buffer_size);
+            if (response_len > 0) {
+                ESP_LOGI(log_tag, "HTTP fallback attempt %d success, received %u bytes", attempt + 1, response_len);
+                return response_len;
             }
+        }
+
+        ESP_LOGW(log_tag, "HTTP attempt %d failed (response_len=%u, last_status=%d)",
+                 attempt + 1, response_len, s_last_http_status);
+        if (attempt < WEATHER_HTTP_MAX_RETRIES - 1) {
+            vTaskDelay(pdMS_TO_TICKS(WEATHER_HTTP_BACKOFF_MS[attempt]));
         }
     }
     ESP_LOGE(log_tag, "All %d HTTP attempts failed", WEATHER_HTTP_MAX_RETRIES);

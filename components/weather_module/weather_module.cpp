@@ -625,8 +625,35 @@ void weather_module_start(void) {
     TaskHandle_t handle = NULL;
 
 #if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY)
+    const int internal_stack_sizes[] = { 12 * 1024, 10 * 1024, 8 * 1024 }; // bytes
+    for (size_t i = 0; i < sizeof(internal_stack_sizes)/sizeof(internal_stack_sizes[0]); ++i) {
+        int sz_bytes = internal_stack_sizes[i];
+        BaseType_t rc = xTaskCreateWithCaps(
+            weather_task,
+            "weather_task",
+            sz_bytes,
+            NULL,
+            tskIDLE_PRIORITY + 1,
+            &handle,
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (rc == pdPASS) {
+            ESP_LOGI(TAG, "weather_module: weather_task created with INTERNAL stack=%d", sz_bytes);
+            res = pdPASS;
+            break;
+        }
+
+        ESP_LOGW(TAG,
+                 "weather_module: failed to create INTERNAL weather_task stack=%d (res=%d, free_int=%u, largest_int=%u)",
+                 sz_bytes,
+                 (int)rc,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+#endif
+
+#if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY)
     const int static_stack_sizes[] = { 16 * 1024, 12 * 1024, 8 * 1024 }; // bytes
-    for (size_t i = 0; i < sizeof(static_stack_sizes)/sizeof(static_stack_sizes[0]); ++i) {
+    for (size_t i = 0; res != pdPASS && i < sizeof(static_stack_sizes)/sizeof(static_stack_sizes[0]); ++i) {
         int sz_bytes = static_stack_sizes[i];
 
         StaticTask_t *tcb = (StaticTask_t*) heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -645,7 +672,7 @@ void weather_module_start(void) {
         UBaseType_t stack_depth = (UBaseType_t)(sz_bytes / sizeof(StackType_t));
         TaskHandle_t h = xTaskCreateStatic(weather_task, "weather_task", stack_depth, NULL, 1, stack, tcb);
         if (h) {
-            ESP_LOGI(TAG, "weather_module: weather_task static created with stack=%d (SPIRAM) and TCB in INTERNAL", sz_bytes);
+            ESP_LOGW(TAG, "weather_module: weather_task static created with stack=%d (SPIRAM) and TCB in INTERNAL", sz_bytes);
             weather_tcb = tcb;
             weather_stack = stack;
             handle = h;

@@ -158,18 +158,32 @@ static esp_err_t location_http_event_handler(esp_http_client_event_t* evt)
                 double parsed_lon = 0.0;
 
                 // IMPORTANT: do not overwrite previous coordinates with defaults; assign only when values are present
-                if (json_obj_get_string(&jctx, "lat", lat_str, sizeof(lat_str)) == OS_SUCCESS &&
-                    json_obj_get_string(&jctx, "lon", lon_str, sizeof(lon_str)) == OS_SUCCESS) {
-                    double lat = atof(lat_str);
-                    double lon = atof(lon_str);
+                float lat_num = 0.0f;
+                float lon_num = 0.0f;
+                bool coords_parsed = false;
+                double lat = 0.0;
+                double lon = 0.0;
+                if (json_obj_get_float(&jctx, "lat", &lat_num) == OS_SUCCESS &&
+                    json_obj_get_float(&jctx, "lon", &lon_num) == OS_SUCCESS) {
+                    lat = (double)lat_num;
+                    lon = (double)lon_num;
+                    coords_parsed = true;
+                } else if (json_obj_get_string(&jctx, "lat", lat_str, sizeof(lat_str)) == OS_SUCCESS &&
+                           json_obj_get_string(&jctx, "lon", lon_str, sizeof(lon_str)) == OS_SUCCESS) {
+                    lat = atof(lat_str);
+                    lon = atof(lon_str);
+                    coords_parsed = true;
+                }
+
+                if (coords_parsed) {
                     // consider coordinates valid if they are not 0/0
-                    if (! (lat == 0.0 && lon == 0.0)) {
+                    if (!(lat == 0.0 && lon == 0.0) && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
                         parsed_lat  = lat;
                         parsed_lon  = lon;
                         have_coords = true;
                         ESP_LOGI(TAG, "Location: Got coordinates - lat: %f, lon: %f", parsed_lat, parsed_lon);
                     } else {
-                        ESP_LOGW(TAG, "Location: coordinates are 0, ignoring");
+                        ESP_LOGW(TAG, "Location: invalid coordinates (%f,%f), ignoring", lat, lon);
                     }
                 }
 
